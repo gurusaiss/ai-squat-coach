@@ -1,0 +1,310 @@
+# ============================================================================
+# SQUAT ASSESSMENT SKILL
+# ============================================================================
+# Purpose: a reusable, inspectable, machine-readable extraction of the
+# reference document ("The Squat" / "Learning to Squat" chapter, Rippetoe,
+# appended to the hiring assignment as Document_for_skill.pdf) into rules an
+# embedded agent can apply to a side-view barbell squat video.
+#
+# Citation convention: "ref_pages" refer to the REFERENCE document's own page
+# numbers (1-35), as instructed in the assignment ("Reference PDF ... Cite
+# its page numbers as reference pages 1-35"), NOT the combined PDF's page
+# numbers (which are ref_page + 3).
+#
+# This file is the single source of truth the application reads at runtime
+# (skill_loader.py). Change a value here and the app's behavior changes
+# without touching application code -- that is the point of extracting the
+# document into a "skill" rather than hard-coding squat advice in prompts.
+#
+# IMPORTANT ON THRESHOLDS: the reference document gives very few literal
+# numeric thresholds. Where it gives one (e.g. "about 45 degrees", "hip
+# joint ... must drop below [top of patella]"), that is marked
+# `source: "document"`. Where the document only gives a qualitative
+# description (e.g. "a little forward of the toes", "excessive"), we had to
+# pick an implementation band to make the qualitative rule operational on
+# pixel measurements. Those are marked `source: "implementation_calibration"`
+# and are NOT to be read as the document's own numbers -- the app's UI and
+# findings always disclose this distinction, per the assignment's
+# instruction not to "add unsupported thresholds ... and present them as
+# document requirements."
+# ============================================================================
+
+document:
+  title: "The Squat (Starting Strength squat chapter, excerpted as Document_for_skill.pdf)"
+  reference_page_range: [1, 35]
+  note: >
+    The document describes the LOW-BAR back squat specifically (Figure 2-8A),
+    contrasted throughout with the high-bar/front squat. All criteria below
+    assume the user is attempting a low-bar-style back squat unless noted.
+
+camera_assumptions:
+  required_view: "side (sagittal plane), full body, barbell visible, lifter facing perpendicular to camera"
+  notes: >
+    All "assessable" criteria below assume the camera is a clean profile
+    (90 degree) view. A view angled even 10-20 degrees off profile will
+    skew every joint-angle and bar-path measurement; the app flags this
+    as a confound rather than silently trusting a bad angle.
+
+# ----------------------------------------------------------------------------
+# CRITERIA ASSESSABLE FROM A SIDE-VIEW VIDEO
+# ----------------------------------------------------------------------------
+criteria:
+
+  - id: depth
+    name: "Squat depth (hip crease vs. knee)"
+    side_view_assessable: true
+    source:
+      ref_pages: [1, 2, 17, 18]
+      sections: ["The Squat (intro)", "Figure 2-1 caption", "Squat Depth - Safety and Importance"]
+      quote: >
+        "The top of the patella (A) and the hip joint, as identified by the
+        apex in the crease of the shorts (B). The B side of the plane formed
+        by these two points must drop below parallel with the ground."
+        / "Correctly is deep, with hips dropping below level with the top of
+        the patellas ... Correctly is therefore full range of motion."
+        / "Any squat that is not deep is a partial squat."
+    measurement:
+      landmarks: [hip, knee]
+      definition: >
+        At the bottom frame of each repetition, compare the vertical
+        (normalized-y) position of the hip landmark to the knee landmark.
+        Depth margin = hip_y - knee_y (image y grows downward), expressed
+        also as a fraction of thigh length (hip-to-knee distance when
+        standing) for scale-independence.
+      threshold_source: document
+      jitter_tolerance_normalized: -0.05  # implementation_calibration: landmark-noise tolerance, not a document value
+    verdict_logic:
+      meets: "hip landmark is at or below (image-y >=) the knee landmark at the bottom frame -> thigh at/below parallel, matches the document's own depth definition."
+      does_not_meet: "hip landmark stays clearly above the knee landmark (the document's explicit 'partial squat' case)."
+      cannot_assess: "hip or knee landmark visibility/confidence below tracking threshold at the apparent bottom frame (occlusion, poor framing, camera angle not side-on)."
+    feedback:
+      meets: "Depth meets the document's standard: hip dropped to/below the top of the knee at the bottom of the rep."
+      does_not_meet: "This rep did not reach the document's depth standard (hip stayed above knee height) -- the document calls this a partial squat, which 'stress[es] the knees and the quadriceps without stressing the glutes, the adductors, or the hamstrings' (ref. p. 18)."
+
+  - id: back_angle_bottom
+    name: "Back angle at the bottom (should be inclined, not vertical)"
+    side_view_assessable: true
+    source:
+      ref_pages: [11, 24, 25, 38]
+      sections: ["Figure 2-5 caption", "bottom position description", "Important Things You're Going to Do Wrong - Back angle"]
+      quote: >
+        "The back angle is formed by the plane of the torso and the floor."
+        / "Also notice that your back is inclined at about a 45-degree
+        angle, not at all vertical. You may think it's vertical, but it
+        won't be and it's not supposed to be."
+        / "Your back will (usually) be too vertical ... or your back will be
+        too horizontal ... Either error will adversely affect hip drive and
+        depth."
+    measurement:
+      landmarks: [shoulder, hip, knee]
+      definition: >
+        Back angle = angle between the torso vector (hip->shoulder) and the
+        horizontal (floor), at the bottom frame of the rep.
+      threshold_source: "document gives the ~45 degree reference point and the 'too vertical' / 'too horizontal' failure directions; the numeric band width around 45 degrees is an implementation_calibration"
+      calibration_band_degrees: [30, 60]
+      # ^ implementation_calibration: band width, not a literal document number
+    verdict_logic:
+      meets: "back angle within the calibration band (~30-60 degrees from horizontal) at the bottom frame."
+      does_not_meet: "back angle outside the band -- either too vertical (torso upright, document's most common beginner fault) or too horizontal (excessive forward lean)."
+      cannot_assess: "shoulder or hip landmark not reliably tracked, or camera not side-on (back angle is meaningless from a non-profile view)."
+    feedback:
+      does_not_meet_too_vertical: "Back angle measured at {value} degrees from horizontal -- close to vertical. The document identifies this as the most common error: 'you will lift your chest instead of driving your hips up ... this will kill your power out of the bottom.'"
+      does_not_meet_too_horizontal: "Back angle measured at {value} degrees from horizontal -- quite flat/forward-leaning. The document warns this 'will adversely affect hip drive and depth' and risks the bar drifting forward of the midfoot."
+      meets: "Back angle measured at {value} degrees from horizontal, consistent with the document's ~45-degree low-bar reference position."
+
+  - id: hip_drive_ascent
+    name: "Hip drive / back-angle consistency during the ascent"
+    side_view_assessable: true
+    source:
+      ref_pages: [25, 26, 36, 38]
+      sections: ["Generating hip drive", "Figure 2-14 caption", "Figure 2-22 caption", "Important Things You're Going to Do Wrong - Hip drive"]
+      quote: >
+        "Hip extension is the first part of the upward drive out of the
+        bottom." / "Flopping forward allows the bar to drop forward of the
+        midfoot." / "You will lift your chest instead of driving your hips
+        up. This will kill your power out of the bottom by making your back
+        angle too vertical."
+    measurement:
+      landmarks: [shoulder, hip, knee, ankle, bar_x]
+      definition: >
+        Track back angle and bar horizontal position across the ascent
+        (bottom frame to standing frame). Compare the back-angle value and
+        the bar's horizontal offset from the ankle (midfoot proxy) at an
+        early-ascent checkpoint (hips ~30% of the way back up) to the bottom
+        and lockout values.
+      threshold_source: "document names both failure directions qualitatively; the 30% early-ascent checkpoint and the magnitude-of-change cutoff used to flag a fault are implementation_calibration."
+      calibration_ascent_checkpoint_fraction: 0.30
+      calibration_back_angle_change_frac_threshold: 0.6
+      calibration_bar_forward_drift_norm_threshold: 0.25
+    verdict_logic:
+      meets: "back angle changes gradually and roughly proportionally to hip extension through the ascent; bar stays close to the ankle/midfoot line throughout."
+      does_not_meet_chest_up: "back angle closes toward vertical disproportionately early in the ascent relative to how little the hips have extended -- the document's 'lifting your chest' fault."
+      does_not_meet_flop_forward: "bar/torso drifts forward of the midfoot during the ascent -- the document's 'flopping forward' fault."
+      cannot_assess: "ascent phase too short/fast to sample, or landmarks/bar not reliably tracked across the ascent."
+    feedback:
+      does_not_meet_chest_up: "The torso straightened up noticeably before the hips extended -- the document calls this 'lifting your chest instead of driving your hips,' which 'kill[s] your power out of the bottom.'"
+      does_not_meet_flop_forward: "The bar/torso moved forward of the midfoot during the ascent ('flopping forward'), which the document says lets 'the bar drop forward of the midfoot' and work against balance."
+      meets: "Hips and shoulders rose together through the ascent with the bar staying close to the midfoot -- consistent with the document's hip-drive description."
+
+  - id: knee_travel
+    name: "Knee position relative to the toe (hip-dominant vs. quad-dominant pattern)"
+    side_view_assessable: true
+    source:
+      ref_pages: [22, 24, 25, 38]
+      sections: ["Figure 2-13 caption", "bottom position description", "Important Things You're Going to Do Wrong - Knee position"]
+      quote: >
+        "The knees are just a little forward of the toes." / "You will fail
+        to shove your knees out as you start down. This will make correct
+        depth hard to attain and will kill your hip drive." / partial squats
+        and front squats are contrasted as forcing the knees "quite forward
+        of the midfoot -- much more so than the low-bar squat."
+    measurement:
+      landmarks: [knee, ankle/toe]
+      definition: >
+        Horizontal offset of the knee landmark from the ankle/toe landmark
+        at the bottom frame, normalized by shank (knee-to-ankle) length.
+      threshold_source: "document describes the correct amount qualitatively ('a little') and the faulty amount only by contrast to other lifts ('much more'); the numeric band is implementation_calibration."
+      calibration_band_normalized_offset: [0.0, 0.6]
+    verdict_logic:
+      meets: "normalized forward offset within the calibration band -- modest forward knee travel, consistent with a hip-dominant low-bar pattern."
+      does_not_meet: "normalized forward offset clearly exceeds the band -- knees traveling well past the toe, the quad-dominant pattern the document attributes to partial squats and front squats."
+      cannot_assess: "ankle/toe or knee not reliably tracked at the bottom frame, or the measurement falls in a borderline zone the document does not give enough precision to call."
+    feedback:
+      meets: "Knees stayed only modestly forward of the toe at depth, consistent with the document's hip-dominant low-bar pattern."
+      does_not_meet: "Knees traveled well forward of the toe at depth. The document associates this much knee travel with quad-dominant patterns (partial squats, front squats), not the hip-driven low-bar squat being assessed here."
+
+  - id: bar_path
+    name: "Bar path verticality over the midfoot"
+    side_view_assessable: "partial"
+    source:
+      ref_pages: [11, 12, 13, 14, 36]
+      sections: ["midfoot balance point discussion", "Figure 2-5-2-7 captions", "Figure 2-22 caption"]
+      quote: >
+        "Good technique in barbell training is easily and understandably
+        defined as the ability of the lifter to keep the bar vertically
+        aligned with the balance point [the midfoot]."
+    measurement:
+      landmarks: ["approximate bar position (see barbell tracking limitation)", ankle]
+      definition: >
+        Maximum horizontal deviation, across the whole rep, of the
+        (approximated) bar x-position from the ankle/midfoot x-position,
+        normalized by foot length.
+      threshold_source: "document states the goal (zero deviation) but only as an ideal at 1RM loads; the tolerance band used for a sub-maximal demonstration video is implementation_calibration."
+      calibration_max_normalized_deviation: 0.5
+    verdict_logic:
+      meets: "max normalized deviation within the calibration band."
+      does_not_meet: "max normalized deviation exceeds the band -- the bar drifts noticeably forward or back of the midfoot during the lift."
+      cannot_assess: "the barbell/plate could not be reliably localized in enough frames of the rep (see known tracking limitation below), or the ankle/midfoot reference is occluded."
+    known_limitation: >
+      This build has no markerless rigid-object tracker trained specifically
+      on barbells. Bar x-position is approximated from the wrist landmarks
+      (which move with the bar in a back-squat grip) refined by a local
+      edge/line search in a band around the shoulder line. This is a
+      disclosed approximation, not a verified bar-tracking system -- see
+      BUILD_NOTES.md.
+
+  - id: head_neck_position
+    name: "Head / eye-gaze position (chin down, not looking up)"
+    side_view_assessable: "partial"
+    source:
+      ref_pages: [25, 26, 27, 38]
+      sections: ["Eye gaze direction ... paragraphs", "Important Things You're Going to Do Wrong - Eye gaze"]
+      quote: >
+        "Looking up at the ceiling when squatting has so many detrimental
+        effects on proper technique ... To correct the error of looking up,
+        fix your eyes on a position on the floor 4 or 5 feet in front of
+        you."
+    measurement:
+      landmarks: [ear, shoulder, hip]
+      definition: >
+        Coarse proxy only: angle of the ear-shoulder line relative to the
+        torso (hip-shoulder) line. A marked upward tilt beyond the torso's
+        own incline is treated as suggestive of an upward gaze/raised chin.
+      threshold_source: implementation_calibration
+      calibration_max_tilt_deg: 20
+    verdict_logic:
+      meets: "head/neck line roughly in line with or slightly below the torso incline (consistent with a down/forward gaze)."
+      does_not_meet: "head/neck line tilts markedly upward relative to the torso incline across most of the rep."
+      cannot_assess: "Pose landmarks do not resolve true eye-gaze direction -- this criterion is reported as low-confidence/advisory even when a verdict is given, and is reported as cannot_assess whenever ear/eye landmark confidence is low (common from a distant side view)."
+    feedback:
+      cannot_assess_default: "Eye-gaze direction cannot be reliably determined from body-landmark tracking alone; head/neck tilt is reported as a low-confidence proxy only."
+
+  - id: rep_count_and_bottom_frames
+    name: "Repetition count and bottom-position identification"
+    side_view_assessable: true
+    is_supporting_measurement: true
+    source:
+      ref_pages: [22, 24]
+      sections: ["bottom position description"]
+    measurement:
+      landmarks: [hip]
+      definition: >
+        Smoothed hip-y trajectory across the video; each local maximum
+        (lowest physical point) that also satisfies a minimum depth/duration
+        filter is counted as one repetition's bottom frame.
+    note: >
+      This is infrastructure the other criteria depend on (which frame is
+      "the bottom", how many reps exist), not itself a document pass/fail
+      rule, so it is not independently reported as meets/does-not-meet.
+
+# ----------------------------------------------------------------------------
+# CRITERIA EXPLICITLY *NOT* ASSESSABLE FROM A SIDE-VIEW VIDEO
+# ----------------------------------------------------------------------------
+not_assessable_from_side_view:
+
+  - id: stance_width_and_toe_angle
+    name: "Stance width and toe-out angle"
+    reason: "Requires a front or overhead view to measure foot spacing and toe angle; a profile view shows at most one foot clearly."
+    source:
+      ref_pages: [22, 23]
+      sections: ["Generating hip drive", "Figure 2-12 caption"]
+
+  - id: knee_lateral_tracking
+    name: "Knee valgus/varus ('knees out' relative to feet)"
+    reason: "Lateral (frontal-plane) knee deviation is invisible in a sagittal/side view; it requires a front-on camera."
+    source:
+      ref_pages: [22, 24, 38]
+      sections: ["Generating hip drive", "Important Things You're Going to Do Wrong - Knee position"]
+
+  - id: bar_back_placement
+    name: "Bar placement on the back (low-bar vs. high-bar position)"
+    reason: "Requires a close rear/overhead view of the bar-to-scapula relationship; not resolvable at typical side-view recording distance/angle."
+    source:
+      ref_pages: [19, 20, 30, 31]
+      sections: ["Figure 2-8 caption", "Adding the bar", "Figure 2-19 caption"]
+
+  - id: grip_and_wrist
+    name: "Grip width and wrist alignment"
+    reason: "Requires a close view of the hands on the bar; not resolvable at typical recording distance, and often occluded by the body in a side view."
+    source:
+      ref_pages: [31, 32, 33]
+      sections: ["grip width discussion", "Figure 2-17/2-18 captions"]
+
+  - id: rack_and_unrack_technique
+    name: "Rack height and unracking/re-racking technique"
+    reason: "A pre-lift setup procedure, usually out of frame or occurring before the recorded rep window; also depends on equipment not visible in most squat clips."
+    source:
+      ref_pages: [30, 34, 35]
+      sections: ["Adding the bar", "stepping back out of the rack"]
+
+  - id: load_appropriateness
+    name: "Whether the weight used is appropriate for the lifter"
+    reason: "The document does not define a load standard assessable from video; plate/bar weight is frequently unreadable on camera."
+    source:
+      ref_pages: []
+      sections: []
+
+# ----------------------------------------------------------------------------
+# HOW THE SYSTEM BEHAVES WHEN EVIDENCE IS INSUFFICIENT
+# ----------------------------------------------------------------------------
+insufficient_evidence_policy: >
+  If a required landmark's visibility/confidence score is below the pose
+  model's own low-confidence threshold for more than a short run of frames
+  around the relevant instant (e.g. the bottom of a rep), or the camera is
+  judged not to be a side-on view, the corresponding criterion is reported
+  as "cannot_assess" with the specific reason (which landmark, what
+  confidence, which frames) rather than guessing. The system never
+  fabricates a meets/does-not-meet verdict to fill a gap. Per-rep findings
+  always carry the frame/timestamp and the raw measurement that produced
+  the verdict, so the verdict is reproducible and inspectable, not just
+  asserted.
